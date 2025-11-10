@@ -24,9 +24,13 @@ For each incoming user message, decide if it should be handled by one of your ag
 class AgentsConfig(BaseModel):
     deployment_url: str
     """The URL of the LangGraph deployment"""
-    agent_id: str
+    agent_id: str = os.getenv("AGENT_ID", "550e8400-e29b-41d4-a716-446655440000")
     """The ID of the agent to use"""
-    name: str
+    tenant_id: str = os.getenv("TENANT_ID", "67e55044-10b1-426f-9247-bb680e5fe0c8")
+    """The tenant ID (expected to be a UUID v4)"""
+    project_id: str = os.getenv("PROJECT_ID", "123e4567-e89b-12d3-a456-426614174000")
+    """The project ID (expected to be a UUID v4). Defaults to `PROJECT_ID` env var if set."""
+    name: str = "supervisor_agent"
     """The name of the agent"""
 
 
@@ -47,55 +51,55 @@ class GraphConfigPydantic(BaseModel):
         },
     )
     supervisor_model: str = Field(
-        default="openai:gpt-4.1",
+        default="ollama:gpt-oss",
         metadata={
             "x_oap_ui_config": {
                 "type": "select",
                 "placeholder": "Select the model to use for the supervisor.",
                 "options": [
                     {
-                        "label": "Claude Sonnet 4",
-                        "value": "anthropic:claude-sonnet-4-0",
+                        "label": "gpt",
+                        "value": "ollama:gpt-oss",
                     },
                     {
-                        "label": "Claude 3.7 Sonnet",
-                        "value": "anthropic:claude-3-7-sonnet-latest",
+                        "label": "Mistral",
+                        "value": "ollama:mistral",
                     },
                     {
-                        "label": "Claude 3.5 Sonnet",
-                        "value": "anthropic:claude-3-5-sonnet-latest",
+                        "label": "CodeLlama",
+                        "value": "ollama:codellama",
                     },
                     {
-                        "label": "Claude 3.5 Haiku",
-                        "value": "anthropic:claude-3-5-haiku-latest",
+                        "label": "Mixtral",
+                        "value": "ollama:mixtral",
                     },
                     {
-                        "label": "o4 mini",
-                        "value": "openai:o4-mini",
+                        "label": "Llama2 Uncensored",
+                        "value": "ollama:llama2-uncensored",
                     },
                     {
-                        "label": "o3",
-                        "value": "openai:o3",
+                        "label": "Nous-Hermes",
+                        "value": "ollama:nous-hermes",
                     },
                     {
-                        "label": "o3 mini",
-                        "value": "openai:o3-mini",
+                        "label": "Neural Chat",
+                        "value": "ollama:neural-chat",
                     },
                     {
-                        "label": "GPT 4o",
-                        "value": "openai:gpt-4o",
+                        "label": "Starling-LM",
+                        "value": "ollama:starling-lm",
                     },
                     {
-                        "label": "GPT 4o mini",
-                        "value": "openai:gpt-4o-mini",
+                        "label": "Phi",
+                        "value": "ollama:phi",
                     },
                     {
-                        "label": "GPT 4.1",
-                        "value": "openai:gpt-4.1",
+                        "label": "OpenHermes",
+                        "value": "ollama:openhermes",
                     },
                     {
-                        "label": "GPT 4.1 mini",
-                        "value": "openai:gpt-4.1-mini",
+                        "label": "Dolphin Mistral",
+                        "value": "ollama:dolphin-mistral",
                     },
                 ]
             }
@@ -169,12 +173,17 @@ def make_child_graphs(cfg: GraphConfigPydantic, access_token: Optional[str] = No
             name=sanitize_name(agent.name),
             headers=headers,
         )
+    print("Creating child graphs for agents:", [a.name for a in cfg.agents])
 
     return [create_remote_graph_wrapper(a) for a in cfg.agents]
 
 
 def get_api_key_for_model(model_name: str, config: RunnableConfig):
     model_name = model_name.lower()
+    # Special case for Ollama - no API key needed
+    if model_name.startswith("ollama:"):
+        return None
+        
     model_to_key = {
         "openai:": "OPENAI_API_KEY",
         "anthropic:": "ANTHROPIC_API_KEY", 
@@ -191,12 +200,16 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
     return os.getenv(key_name)
 
 
-def make_model(cfg: GraphConfigPydantic, model_api_key: str):
+def make_model(cfg: GraphConfigPydantic, model_api_key: Optional[str]):
     """Instantiate the LLM for the supervisor based on the config."""
-    return init_chat_model(
-        model=cfg.supervisor_model,
-        api_key=model_api_key
-    )
+    kwargs = {"model": cfg.supervisor_model}
+    
+    if cfg.supervisor_model.startswith("ollama:"):
+        kwargs["base_url"] = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+    elif model_api_key:
+        kwargs["api_key"] = model_api_key
+        
+    return init_chat_model(**kwargs)
 
 
 def make_prompt(cfg: GraphConfigPydantic):
@@ -209,12 +222,13 @@ def graph(config: RunnableConfig):
     supabase_access_token = config.get("configurable", {}).get(
         "x-supabase-access-token"
     )
+    
 
     # Pass the token to make_child_graphs, which now handles None values
     child_graphs = make_child_graphs(cfg, supabase_access_token)
 
     # Get the API key from the RunnableConfig or from the environment variable
-    model_api_key = get_api_key_for_model(cfg.supervisor_model, config) or "No token found"
+    model_api_key = get_api_key_for_model(cfg.supervisor_model, config)
 
     return create_supervisor(
         child_graphs,
